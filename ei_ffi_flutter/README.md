@@ -2,6 +2,14 @@
 
 Test project to see how to include the Edge Impulse C++ library into Flutter.
 
+However, the Edge Impulse C++ library will not compile in.
+
+To reproduce the problem:
+In file `"native_ei.cpp"` un-rem line:
+`//#include "edge-impulse-sdk\classifier\ei_run_classifier.h"`
+
+The complete error text is in a comment at the top of file `"native_ei.cpp"`.
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.
