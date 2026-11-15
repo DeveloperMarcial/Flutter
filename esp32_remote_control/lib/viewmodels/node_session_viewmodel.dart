@@ -40,6 +40,58 @@ class ChatMessage {
   });
 }
 
+class ChurnProgress {
+  final int currentCycle;
+  final int totalCycles;
+  final double latencyMs;
+  final int heap;
+  final int uptime;
+  final int resets;
+  final String status;
+
+  ChurnProgress({
+    required this.currentCycle,
+    required this.totalCycles,
+    required this.latencyMs,
+    required this.heap,
+    required this.uptime,
+    required this.resets,
+    required this.status,
+  });
+}
+
+class ChurnTestResult {
+  final int totalCycles;
+  final int successCycles;
+  final int failCycles;
+  final int nodeResets;
+  final int initialHeap;
+  final int finalHeap;
+  final int heapDelta;
+  final bool heapStable;
+  final double minLatencyMs;
+  final double avgLatencyMs;
+  final double maxLatencyMs;
+  final bool passed;
+  final String? failureReason;
+
+  ChurnTestResult({
+    required this.totalCycles,
+    required this.successCycles,
+    required this.failCycles,
+    required this.nodeResets,
+    required this.initialHeap,
+    required this.finalHeap,
+    required this.heapDelta,
+    required this.heapStable,
+    required this.minLatencyMs,
+    required this.avgLatencyMs,
+    required this.maxLatencyMs,
+    required this.passed,
+    this.failureReason,
+  });
+}
+
 class NodeSessionViewModel extends ChangeNotifier {
   final RemoteTransport _transport;
   final TokenVault _vault;
@@ -57,6 +109,7 @@ class NodeSessionViewModel extends ChangeNotifier {
   bool _isConnecting = false;
   bool _isExecutingCommand = false;
   bool _isAuthenticated = false;
+  bool _isChurnRunning = false;
   String? _activeToken;
   String? _lastError;
 
@@ -84,6 +137,7 @@ class NodeSessionViewModel extends ChangeNotifier {
   bool get isConnecting => _isConnecting;
   bool get isExecutingCommand => _isExecutingCommand;
   bool get isAuthenticated => _isAuthenticated;
+  bool get isChurnRunning => _isChurnRunning;
   int get negotiatedMtu => _transport.negotiatedMtu;
   DiscoveredNode? get currentNode => _currentNode;
   HelloResult? get helloResult => _helloResult;
@@ -101,16 +155,18 @@ class NodeSessionViewModel extends ChangeNotifier {
 
   void _onConnectionChanged(bool connected) {
     if (!connected) {
-      _isAuthenticated = false;
-      _helloResult = null;
-      _statusResult = null;
-      _peers = [];
-      _gnssResult = null;
-      _routes = [];
-      _lastPingResult = null;
-      _lastSendResult = null;
-      _isExecutingCommand = false;
-      _syncTraceMetadata();
+      if (!_isChurnRunning) {
+        _isAuthenticated = false;
+        _helloResult = null;
+        _statusResult = null;
+        _peers = [];
+        _gnssResult = null;
+        _routes = [];
+        _lastPingResult = null;
+        _lastSendResult = null;
+        _isExecutingCommand = false;
+        _syncTraceMetadata();
+      }
     }
     notifyListeners();
   }
@@ -196,7 +252,9 @@ class NodeSessionViewModel extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await _transport.disconnect();
-    _currentNode = null;
+    if (!_isChurnRunning) {
+      _currentNode = null;
+    }
     _helloResult = null;
     _statusResult = null;
     _peers = [];
@@ -647,6 +705,186 @@ class NodeSessionViewModel extends ChangeNotifier {
     if (minutes > 0 || parts.isNotEmpty) parts.add('${minutes}m');
     parts.add('${secs}s');
     return parts.join(' ');
+  }
+
+  /// Priority Gate P6 Task 6.1: 50-Cycle Connection Churn Test on Android
+  Future<ChurnTestResult> runChurnTest({
+    int totalCycles = 50,
+    Duration interCycleDelay = const Duration(milliseconds: 250),
+    void Function(ChurnProgress progress)? onProgress,
+  }) async {
+    final targetNode = _currentNode;
+    if (targetNode == null) {
+      throw const RemoteTransportException('No active node connected for churn test');
+    }
+
+    _isChurnRunning = true;
+    _isExecutingCommand = true;
+    notifyListeners();
+
+    int successCount = 0;
+    int failCount = 0;
+    int nodeResets = 0;
+    int? initialHeap;
+    int? finalHeap;
+    int? initialUptime;
+    int? prevUptime;
+    int? finalUptime;
+    final List<double> latencies = [];
+    String? failureReason;
+
+    traceLog?.logControl('CHURN', '=== TASK 6.1: 50-CYCLE RECONNECTION CHURN START ===');
+
+    try {
+      for (int cycle = 1; cycle <= totalCycles; cycle++) {
+        final stopwatch = Stopwatch()..start();
+        onProgress?.call(ChurnProgress(
+          currentCycle: cycle,
+          totalCycles: totalCycles,
+          latencyMs: latencies.isNotEmpty ? latencies.last : 0.0,
+          heap: finalHeap ?? (initialHeap ?? 0),
+          uptime: finalUptime ?? (initialUptime ?? 0),
+          resets: nodeResets,
+          status: 'Cycle $cycle/$totalCycles: Connecting...',
+        ));
+
+        try {
+          if (!_transport.isConnected) {
+            bool connected = false;
+            for (int attempt = 0; attempt < 2; attempt++) {
+              try {
+                await connect(targetNode);
+                connected = true;
+                break;
+              } catch (connErr) {
+                if (attempt == 0) {
+                  await Future.delayed(const Duration(milliseconds: 500));
+                } else {
+                  rethrow;
+                }
+              }
+            }
+            if (!connected) {
+              throw const RemoteTransportException('Failed to establish BLE connection');
+            }
+          }
+
+          onProgress?.call(ChurnProgress(
+            currentCycle: cycle,
+            totalCycles: totalCycles,
+            latencyMs: latencies.isNotEmpty ? latencies.last : 0.0,
+            heap: finalHeap ?? (initialHeap ?? 0),
+            uptime: finalUptime ?? (initialUptime ?? 0),
+            resets: nodeResets,
+            status: 'Cycle $cycle/$totalCycles: Querying Status...',
+          ));
+
+          final status = await getStatus();
+          final elapsed = stopwatch.elapsedMilliseconds.toDouble();
+          latencies.add(elapsed);
+
+          final curHeap = status.freeHeap;
+          final curUptime = status.uptimeSeconds;
+
+          if (initialHeap == null) {
+            initialHeap = curHeap;
+            initialUptime = curUptime;
+          }
+
+          if (prevUptime != null && curUptime < prevUptime) {
+            nodeResets++;
+          }
+          prevUptime = curUptime;
+          finalHeap = curHeap;
+          finalUptime = curUptime;
+
+          successCount++;
+          final logMsg = '[$cycle/$totalCycles] OK (${elapsed.toStringAsFixed(0)}ms, heap=$curHeap B, uptime=${curUptime}s)';
+          traceLog?.logControl('CHURN', logMsg);
+
+          onProgress?.call(ChurnProgress(
+            currentCycle: cycle,
+            totalCycles: totalCycles,
+            latencyMs: elapsed,
+            heap: curHeap,
+            uptime: curUptime,
+            resets: nodeResets,
+            status: 'Cycle $cycle/$totalCycles: OK (${elapsed.toStringAsFixed(0)}ms)',
+          ));
+
+          // Disconnect unless this was the final cycle
+          if (cycle < totalCycles) {
+            await disconnect();
+            if (interCycleDelay > Duration.zero) {
+              await Future.delayed(interCycleDelay);
+            }
+          }
+        } catch (e) {
+          final elapsed = stopwatch.elapsedMilliseconds.toDouble();
+          failCount++;
+          final errStr = '[$cycle/$totalCycles] FAIL (${elapsed.toStringAsFixed(0)}ms): $e';
+          traceLog?.logControl('CHURN_ERR', errStr);
+
+          onProgress?.call(ChurnProgress(
+            currentCycle: cycle,
+            totalCycles: totalCycles,
+            latencyMs: elapsed,
+            heap: finalHeap ?? 0,
+            uptime: finalUptime ?? 0,
+            resets: nodeResets,
+            status: 'Cycle $cycle/$totalCycles: FAILED: $e',
+          ));
+
+          try {
+            await disconnect();
+          } catch (_) {}
+
+          if (failCount >= 5) {
+            failureReason = 'Aborted after consecutive failures: $e';
+            break;
+          }
+        }
+      }
+    } finally {
+      _isChurnRunning = false;
+      _isExecutingCommand = false;
+
+      // Ensure final state is connected and authenticated with updated status
+      if (!_transport.isConnected) {
+        try {
+          await connect(targetNode);
+          await getStatus();
+        } catch (_) {}
+      }
+      notifyListeners();
+    }
+
+    final initH = initialHeap ?? 0;
+    final finH = finalHeap ?? 0;
+    final deltaH = finH - initH;
+    final heapStable = deltaH.abs() <= 2048; // within ±2 KiB
+    final minLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a < b ? a : b) : 0.0;
+    final maxLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a > b ? a : b) : 0.0;
+    final avgLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a + b) / latencies.length : 0.0;
+    final passed = (successCount == totalCycles) && (failCount == 0) && (nodeResets == 0) && heapStable;
+
+    traceLog?.logControl('CHURN', '=== TASK 6.1 COMPLETE: ${passed ? "PASSED" : "FAILED"} ($successCount/$totalCycles OK, resets=$nodeResets, deltaHeap=${deltaH >= 0 ? "+$deltaH" : "$deltaH"} B) ===');
+
+    return ChurnTestResult(
+      totalCycles: totalCycles,
+      successCycles: successCount,
+      failCycles: failCount,
+      nodeResets: nodeResets,
+      initialHeap: initH,
+      finalHeap: finH,
+      heapDelta: deltaH,
+      heapStable: heapStable,
+      minLatencyMs: minLat,
+      avgLatencyMs: avgLat,
+      maxLatencyMs: maxLat,
+      passed: passed,
+      failureReason: failureReason,
+    );
   }
 
   Future<void> _syncTraceMetadata() async {

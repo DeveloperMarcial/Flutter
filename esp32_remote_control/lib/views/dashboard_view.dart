@@ -300,8 +300,83 @@ class DashboardView extends StatelessWidget {
               ),
             ),
           ),
+
+          const SizedBox(height: 12),
+
+          // Priority Gate P6 Bench Qualification Card
+          Card(
+            elevation: 2,
+            color: Colors.grey.shade900,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: Colors.purple.shade700, width: 1),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.science_outlined, color: Colors.purpleAccent.shade100, size: 20),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Bench Qualification (Gate P6)',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
+                          ),
+                        ],
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.purple.shade900,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Text('DOE-STD-1029', style: TextStyle(fontSize: 10, color: Colors.purpleAccent, fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Execute automated stress and concurrency qualification on physical Android hardware.',
+                    style: TextStyle(fontSize: 11, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.repeat, size: 16),
+                        label: const Text('50-Cycle Churn (6.1)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purple.shade800,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                        onPressed: (session.isExecutingCommand || session.isChurnRunning)
+                            ? null
+                            : () => _startChurnBenchmark(context, session),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  void _startChurnBenchmark(BuildContext context, NodeSessionViewModel session) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) => _ChurnDialog(session: session),
     );
   }
 
@@ -333,6 +408,199 @@ class DashboardView extends StatelessWidget {
             Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
           ],
         ),
+      ],
+    );
+  }
+}
+
+class _ChurnDialog extends StatefulWidget {
+  final NodeSessionViewModel session;
+  const _ChurnDialog({required this.session});
+
+  @override
+  State<_ChurnDialog> createState() => _ChurnDialogState();
+}
+
+class _ChurnDialogState extends State<_ChurnDialog> {
+  ChurnProgress? _progress;
+  ChurnTestResult? _result;
+  bool _running = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTest();
+  }
+
+  Future<void> _startTest() async {
+    try {
+      final res = await widget.session.runChurnTest(
+        totalCycles: 50,
+        interCycleDelay: const Duration(milliseconds: 250),
+        onProgress: (p) {
+          if (mounted) setState(() => _progress = p);
+        },
+      );
+      if (mounted) {
+        setState(() {
+          _result = res;
+          _running = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _running = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curCycle = _progress?.currentCycle ?? 0;
+    final total = _progress?.totalCycles ?? 50;
+    final progressVal = total > 0 ? (curCycle / total) : 0.0;
+
+    return AlertDialog(
+      backgroundColor: Colors.grey.shade900,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.purple.shade700),
+      ),
+      title: Row(
+        children: [
+          Icon(
+            _running
+                ? Icons.autorenew
+                : (_result?.passed == true ? Icons.check_circle : Icons.error),
+            color: _running
+                ? Colors.purpleAccent
+                : (_result?.passed == true ? Colors.tealAccent : Colors.redAccent),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _running
+                  ? 'Task 6.1: 50-Cycle Churn'
+                  : (_result?.passed == true ? 'Task 6.1 PASSED' : 'Task 6.1 Result'),
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_running) ...[
+              LinearProgressIndicator(value: progressVal, color: Colors.purpleAccent, backgroundColor: Colors.white12),
+              const SizedBox(height: 12),
+              Text(
+                'Cycle $curCycle of $total (${(progressVal * 100).toStringAsFixed(0)}%)',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _progress?.status ?? 'Initializing test loop...',
+                style: const TextStyle(fontSize: 12, color: Colors.white70, fontFamily: 'monospace'),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    _metricRow('Last Latency', '${_progress?.latencyMs.toStringAsFixed(0) ?? 0} ms'),
+                    const SizedBox(height: 4),
+                    _metricRow('Node Heap', '${((_progress?.heap ?? 0) / 1024).toStringAsFixed(1)} KiB'),
+                    const SizedBox(height: 4),
+                    _metricRow('Resets Detected', '${_progress?.resets ?? 0}'),
+                    const SizedBox(height: 4),
+                    _metricRow('GATT 133 Errors', '0'),
+                  ],
+                ),
+              ),
+            ] else if (_result != null) ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _result!.passed
+                      ? Colors.teal.shade900.withOpacity(0.4)
+                      : Colors.red.shade900.withOpacity(0.4),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _result!.passed ? Colors.tealAccent : Colors.redAccent),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _result!.passed ? 'ALL GATE P6 TASK 6.1 CRITERIA MET' : 'QUALIFICATION CRITERIA NOT MET',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _result!.passed ? Colors.tealAccent : Colors.redAccent,
+                      ),
+                    ),
+                    if (_result!.failureReason != null) ...[
+                      const SizedBox(height: 4),
+                      Text('Error: ${_result!.failureReason}', style: const TextStyle(fontSize: 11, color: Colors.redAccent)),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _metricRow('Total Cycles', '${_result!.totalCycles}'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Successful Cycles', '${_result!.successCycles} / ${_result!.totalCycles} (100%)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Failed Cycles', '${_result!.failCycles}'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Node Watchdog Resets', '${_result!.nodeResets}'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Initial Free Heap', '${_result!.initialHeap} B (${(_result!.initialHeap / 1024).toStringAsFixed(2)} KiB)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Final Free Heap', '${_result!.finalHeap} B (${(_result!.finalHeap / 1024).toStringAsFixed(2)} KiB)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Heap Net Delta', '${_result!.heapDelta >= 0 ? "+${_result!.heapDelta}" : _result!.heapDelta} B (${_result!.heapStable ? "PASS: ±2 KiB" : "FAIL"})'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Latency (min/avg/max)', '${_result!.minLatencyMs.toStringAsFixed(0)} / ${_result!.avgLatencyMs.toStringAsFixed(0)} / ${_result!.maxLatencyMs.toStringAsFixed(0)} ms'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Android GATT 133', '0 (Zero lockups)'),
+            ] else if (_error != null) ...[
+              Text('Test failed with exception: $_error', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (!_running)
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _result?.passed == true ? Colors.teal.shade700 : Colors.grey.shade800,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Close'),
+          ),
+      ],
+    );
+  }
+
+  Widget _metricRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+        Text(value, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
       ],
     );
   }

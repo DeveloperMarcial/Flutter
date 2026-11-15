@@ -156,7 +156,7 @@ class _MainScaffoldState extends State<MainScaffold> with WidgetsBindingObserver
     final isConnected = session.isConnected;
     final isAuth = session.isAuthenticated;
 
-    final showScanner = !isConnected || _forceShowScanner;
+    final showScanner = (!isConnected && !session.isChurnRunning) || _forceShowScanner;
 
     return Scaffold(
       appBar: AppBar(
@@ -263,7 +263,7 @@ class _MainScaffoldState extends State<MainScaffold> with WidgetsBindingObserver
           ),
         ],
       ),
-      bottomNavigationBar: (!showScanner && isConnected)
+      bottomNavigationBar: (!showScanner && (isConnected || session.isChurnRunning))
           ? NavigationBar(
               selectedIndex: _currentTabIndex,
               onDestinationSelected: (index) {
