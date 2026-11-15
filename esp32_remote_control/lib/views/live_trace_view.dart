@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/share_service.dart';
 import '../services/trace_log_service.dart';
+import '../viewmodels/node_session_viewmodel.dart';
 
 class LiveTraceView extends StatefulWidget {
   const LiveTraceView({super.key});
@@ -55,6 +56,14 @@ class _LiveTraceViewState extends State<LiveTraceView> {
       return;
     }
 
+    final session = context.read<NodeSessionViewModel>();
+    final metadataText = session.formatDashboardMetadataSummary(
+      logFileName: traceService.currentLogFileName,
+      exportTimestamp: DateTime.now(),
+    );
+
+    // Sync latest telemetry and metadata to the disk logfile header before sharing
+    await traceService.updateMetadataHeader(session.formatDashboardMetadataSummary());
     await traceService.flush();
 
     final file = File(path);
@@ -70,12 +79,21 @@ class _LiveTraceViewState extends State<LiveTraceView> {
       return;
     }
 
+    final shareSubject = session.currentNode != null
+        ? 'ESP32 BLE Mesh Trace - ${session.currentNode!.name} (${traceService.currentLogFileName})'
+        : 'ESP32 BLE Mesh Trace Log (${traceService.currentLogFileName})';
+
+    final shareBody = StringBuffer();
+    shareBody.writeln('=== ESP32 BLE Mesh Trace Log Export ===');
+    shareBody.writeln(metadataText);
+    shareBody.writeln('========================================');
+
     try {
       final shared = await ShareService.shareFile(
         filePath: path,
         title: 'Share Trace Log (${traceService.currentLogFileName})',
-        subject:
-            'ESP32 BLE Mesh Trace Log (${traceService.currentLogFileName})',
+        subject: shareSubject,
+        text: shareBody.toString(),
       );
       if (!shared && context.mounted) {
         // If not on Android or native chooser not available, copy path to clipboard

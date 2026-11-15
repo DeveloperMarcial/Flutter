@@ -75,6 +75,9 @@ class NodeSessionViewModel extends ChangeNotifier {
         _vault = vault {
     _connSub = _transport.connectionStream.listen(_onConnectionChanged);
     _eventSub = _transport.eventStream.listen(_onEventReceived);
+    if (traceLog != null) {
+      traceLog!.metadataProvider = () => formatDashboardMetadataSummary();
+    }
   }
 
   bool get isConnected => _transport.isConnected;
@@ -107,6 +110,7 @@ class NodeSessionViewModel extends ChangeNotifier {
       _lastPingResult = null;
       _lastSendResult = null;
       _isExecutingCommand = false;
+      _syncTraceMetadata();
     }
     notifyListeners();
   }
@@ -177,6 +181,8 @@ class NodeSessionViewModel extends ChangeNotifier {
         debugPrint('[NodeSessionViewModel] Initial HELLO failed: $e');
       }
 
+      await _syncTraceMetadata();
+
       _isConnecting = false;
       notifyListeners();
     } catch (e) {
@@ -203,6 +209,7 @@ class NodeSessionViewModel extends ChangeNotifier {
     _isExecutingCommand = false;
     _activeToken = null;
     notifyListeners();
+    await _syncTraceMetadata();
   }
 
   /// Headless PIN enrollment (Task 3.2)
@@ -242,6 +249,7 @@ class NodeSessionViewModel extends ChangeNotifier {
         await _vault.saveToken('eNode-$address', issuedToken);
       }
 
+      await _syncTraceMetadata();
       notifyListeners();
       return resp.helloResult;
     } catch (e) {
@@ -321,6 +329,7 @@ class NodeSessionViewModel extends ChangeNotifier {
         throw RemoteTransportException('NODE_STATUS failed: ${resp.errorCode}');
       }
       _statusResult = resp.statusResult;
+      await _syncTraceMetadata();
       return resp.statusResult;
     } catch (e) {
       _lastError = e.toString();
@@ -558,6 +567,93 @@ class NodeSessionViewModel extends ChangeNotifier {
     _activeToken = null;
     _isAuthenticated = false;
     notifyListeners();
+  }
+
+  /// Formats the dashboard telemetry and metadata into a standardized human-readable summary.
+  String formatDashboardMetadataSummary({
+    String? logFileName,
+    DateTime? exportTimestamp,
+  }) {
+    final hello = _helloResult;
+    final status = _statusResult;
+
+    final nodeAddr = hello?.nodeAddress ?? 0;
+    final nodeName = hello?.nodeName.isNotEmpty == true
+        ? hello!.nodeName
+        : (_currentNode?.name ?? 'Unknown Node');
+    final hwProfile = hello?.hwProfile ?? 1;
+    final fwStamp = hello?.firmwareStamp.isNotEmpty == true
+        ? hello!.firmwareStamp
+        : 'esp32_rx_tx_node_ble';
+
+    final runningSlot = status?.runningSlot.isNotEmpty == true
+        ? (status!.runningSlot.contains('b') || status.runningSlot.contains('B')
+            ? 'Slot B'
+            : 'Slot A')
+        : (isConnected ? 'Slot A' : 'N/A');
+    final uptimeSecs = status?.uptimeSeconds ?? 0;
+    final freeHeap = status?.freeHeap ?? 0;
+    final minFreeHeap = status?.minFreeHeap ?? 0;
+    const totalSram = 327680; // 320 KiB internal SRAM budget
+    final heapRatio = totalSram > 0 ? (freeHeap / totalSram).clamp(0.0, 1.0) : 0.0;
+    final minHeapRatio = totalSram > 0 ? (minFreeHeap / totalSram).clamp(0.0, 1.0) : 0.0;
+    final meshStatus = status != null
+        ? (status.meshOnline ? 'MESH ONLINE' : 'STANDALONE')
+        : (isConnected ? 'STANDALONE' : 'OFFLINE');
+    final otaState = status?.otaState.isNotEmpty == true
+        ? status!.otaState.toUpperCase()
+        : 'IDLE';
+    final bleState = isConnected
+        ? 'Connected (${_currentNode?.id ?? ""})'
+        : 'Disconnected';
+
+    final buf = StringBuffer();
+    if (logFileName != null) {
+      buf.writeln('Logfile: $logFileName');
+    }
+    if (exportTimestamp != null) {
+      buf.writeln('Export Time: ${exportTimestamp.toIso8601String()}');
+    }
+    buf.writeln('Target Node: $nodeName (Address: $nodeAddr)');
+    buf.writeln('Active Slot: $runningSlot | Mesh Status: $meshStatus');
+    buf.writeln('Hardware Profile: XIAO ESP32-S3 ($hwProfile)');
+    buf.writeln('Firmware Stamp: $fwStamp');
+    buf.writeln('ATT MTU: $negotiatedMtu Bytes');
+    buf.writeln('BLE Channel: $bleState');
+    if (status != null) {
+      buf.writeln('Uptime: ${formatUptime(uptimeSecs)} ($uptimeSecs s)');
+      buf.writeln(
+          'Continuous Free Heap: ${(freeHeap / 1024).toStringAsFixed(1)} KiB / 320 KiB (${(heapRatio * 100).toStringAsFixed(0)}%)');
+      buf.writeln(
+          'Min Heap Watermark: ${(minFreeHeap / 1024).toStringAsFixed(1)} KiB (${(minHeapRatio * 100).toStringAsFixed(0)}%)');
+      buf.writeln('OTA State: $otaState');
+    } else {
+      buf.writeln('System Telemetry: Pending refresh / initial query');
+    }
+    return buf.toString().trim();
+  }
+
+  static String formatUptime(int seconds) {
+    if (seconds <= 0) return '0s';
+    final days = seconds ~/ 86400;
+    final rem1 = seconds % 86400;
+    final hours = rem1 ~/ 3600;
+    final rem2 = rem1 % 3600;
+    final minutes = rem2 ~/ 60;
+    final secs = rem2 % 60;
+    final parts = <String>[];
+    if (days > 0) parts.add('${days}d');
+    if (hours > 0) parts.add('${hours}h');
+    if (minutes > 0 || parts.isNotEmpty) parts.add('${minutes}m');
+    parts.add('${secs}s');
+    return parts.join(' ');
+  }
+
+  Future<void> _syncTraceMetadata() async {
+    if (traceLog != null) {
+      final summary = formatDashboardMetadataSummary();
+      await traceLog!.updateMetadataHeader(summary);
+    }
   }
 
   @override
