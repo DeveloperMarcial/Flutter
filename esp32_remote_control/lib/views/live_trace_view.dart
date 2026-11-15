@@ -65,6 +65,38 @@ class _LiveTraceViewState extends State<LiveTraceView> {
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                   ),
                   const Spacer(),
+                  // Logging enable/disable checkbox
+                  InkWell(
+                    onTap: () => traceService.setLoggingEnabled(!traceService.loggingEnabled),
+                    borderRadius: BorderRadius.circular(4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          height: 24,
+                          width: 24,
+                          child: Checkbox(
+                            value: traceService.loggingEnabled,
+                            onChanged: (val) => traceService.setLoggingEnabled(val ?? true),
+                            activeColor: Colors.tealAccent,
+                            checkColor: Colors.black,
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        Text(
+                          'Logging',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: traceService.loggingEnabled ? Colors.white : Colors.white54,
+                            fontWeight: traceService.loggingEnabled ? FontWeight.w600 : FontWeight.normal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   // Auto-scroll toggle
                   FilterChip(
                     label: Text(
@@ -125,11 +157,13 @@ class _LiveTraceViewState extends State<LiveTraceView> {
           child: Container(
             color: const Color(0xFF0D1117), // Deep dark console background
             child: entries.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text(
-                      'No packet trace events logged yet.\nBLE TX/RX activity will display here in real time.',
+                      traceService.loggingEnabled
+                          ? 'No packet trace events logged yet.\nBLE TX/RX activity will display here in real time.'
+                          : 'Trace logging is currently paused / disabled.\nCheck the "Logging" box above to resume capture.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white30, fontFamily: 'monospace', fontSize: 12),
+                      style: const TextStyle(color: Colors.white30, fontFamily: 'monospace', fontSize: 12),
                     ),
                   )
                 : ListView.builder(

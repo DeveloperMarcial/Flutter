@@ -67,6 +67,7 @@ class TraceEntry {
 class TraceLogService extends ChangeNotifier {
   static const int maxEntries = 500;
   final List<TraceEntry> _entries = [];
+  bool _loggingEnabled = true;
   bool _autoScroll = true;
   TraceDirection? _activeFilter;
 
@@ -78,8 +79,16 @@ class TraceLogService extends ChangeNotifier {
   }
 
   int get totalCount => _entries.length;
+  bool get loggingEnabled => _loggingEnabled;
   bool get autoScroll => _autoScroll;
   TraceDirection? get activeFilter => _activeFilter;
+
+  void setLoggingEnabled(bool value) {
+    if (_loggingEnabled != value) {
+      _loggingEnabled = value;
+      notifyListeners();
+    }
+  }
 
   void setAutoScroll(bool value) {
     _autoScroll = value;
@@ -97,6 +106,8 @@ class TraceLogService extends ChangeNotifier {
     required String message,
     List<int>? rawBytes,
   }) {
+    if (!_loggingEnabled) return;
+
     final entry = TraceEntry(
       direction: direction,
       tag: tag,

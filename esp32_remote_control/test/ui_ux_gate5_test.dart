@@ -101,23 +101,23 @@ void main() {
       final rx = traceService.entries[0];
       expect(rx.direction, equals(TraceDirection.rx));
       expect(rx.directionLabel, equals('[BLE RX]'));
-      expect(rx.color.value, equals(0xFF00E5FF)); // Cyan
+      expect(rx.color.toARGB32(), equals(0xFF00E5FF)); // Cyan
       expect(rx.toClipboardString(), contains('[BLE RX] PACKET: Incoming data | HEX: aa bb'));
 
       final tx = traceService.entries[1];
       expect(tx.direction, equals(TraceDirection.tx));
       expect(tx.directionLabel, equals('[BLE TX]'));
-      expect(tx.color.value, equals(0xFF69F0AE)); // Light Green
+      expect(tx.color.toARGB32(), equals(0xFF69F0AE)); // Light Green
 
       final ctrl = traceService.entries[2];
       expect(ctrl.direction, equals(TraceDirection.control));
       expect(ctrl.directionLabel, equals('[BLE CTRL]'));
-      expect(ctrl.color.value, equals(0xFFFFD740)); // Yellow
+      expect(ctrl.color.toARGB32(), equals(0xFFFFD740)); // Yellow
 
       final err = traceService.entries[3];
       expect(err.direction, equals(TraceDirection.error));
       expect(err.directionLabel, equals('[ERR]'));
-      expect(err.color.value, equals(0xFFFF5252)); // Red
+      expect(err.color.toARGB32(), equals(0xFFFF5252)); // Red
     });
 
     test('Task 5.5: TraceLogService filter by direction and clear operations', () {
@@ -137,6 +137,29 @@ void main() {
 
       traceService.clear();
       expect(traceService.totalCount, equals(0));
+    });
+
+    test('Task 5.5: TraceLogService loggingEnabled toggle pauses and resumes log capture', () {
+      final traceService = TraceLogService();
+      expect(traceService.loggingEnabled, isTrue);
+
+      traceService.logRx('RX', 'Before disable');
+      expect(traceService.entries.length, equals(1));
+
+      traceService.setLoggingEnabled(false);
+      expect(traceService.loggingEnabled, isFalse);
+
+      traceService.logTx('TX', 'While disabled');
+      traceService.logControl('CTRL', 'While disabled');
+      traceService.logError('ERR', 'While disabled');
+      expect(traceService.entries.length, equals(1)); // No new logs captured
+
+      traceService.setLoggingEnabled(true);
+      expect(traceService.loggingEnabled, isTrue);
+
+      traceService.logTx('TX', 'After re-enable');
+      expect(traceService.entries.length, equals(2));
+      expect(traceService.entries.last.message, equals('After re-enable'));
     });
 
     DiscoveredNode createTestNode() => DiscoveredNode(
