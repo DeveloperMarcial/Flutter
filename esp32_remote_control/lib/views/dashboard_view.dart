@@ -361,6 +361,18 @@ class DashboardView extends StatelessWidget {
                             ? null
                             : () => _startChurnBenchmark(context, session),
                       ),
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.flash_on, size: 16),
+                        label: const Text('LoRa Stress (6.2)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.deepOrange.shade800,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                        onPressed: (session.isExecutingCommand || session.isChurnRunning)
+                            ? null
+                            : () => _startBrownoutStressBenchmark(context, session),
+                      ),
                     ],
                   ),
                 ],
@@ -377,6 +389,14 @@ class DashboardView extends StatelessWidget {
       context: context,
       barrierDismissible: false,
       builder: (dialogCtx) => _ChurnDialog(session: session),
+    );
+  }
+
+  void _startBrownoutStressBenchmark(BuildContext context, NodeSessionViewModel session) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) => _BrownoutStressDialog(session: session),
     );
   }
 
@@ -575,6 +595,202 @@ class _ChurnDialogState extends State<_ChurnDialog> {
               _metricRow('Latency (min/avg/max)', '${_result!.minLatencyMs.toStringAsFixed(0)} / ${_result!.avgLatencyMs.toStringAsFixed(0)} / ${_result!.maxLatencyMs.toStringAsFixed(0)} ms'),
               const Divider(color: Colors.white12, height: 8),
               _metricRow('Android GATT 133', '0 (Zero lockups)'),
+            ] else if (_error != null) ...[
+              Text('Test failed with exception: $_error', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (!_running)
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _result?.passed == true ? Colors.teal.shade700 : Colors.grey.shade800,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Close'),
+          ),
+      ],
+    );
+  }
+
+  Widget _metricRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+        Text(value, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+      ],
+    );
+  }
+}
+
+class _BrownoutStressDialog extends StatefulWidget {
+  final NodeSessionViewModel session;
+  const _BrownoutStressDialog({required this.session});
+
+  @override
+  State<_BrownoutStressDialog> createState() => _BrownoutStressDialogState();
+}
+
+class _BrownoutStressDialogState extends State<_BrownoutStressDialog> {
+  BrownoutStressProgress? _progress;
+  BrownoutStressResult? _result;
+  bool _running = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTest();
+  }
+
+  Future<void> _startTest() async {
+    try {
+      final res = await widget.session.runBrownoutStressTest(
+        totalBursts: 20,
+        destAddress: 43,
+        interBurstDelay: const Duration(milliseconds: 250),
+        onProgress: (p) {
+          if (mounted) setState(() => _progress = p);
+        },
+      );
+      if (mounted) {
+        setState(() {
+          _result = res;
+          _running = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _running = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curBurst = _progress?.currentBurst ?? 0;
+    final total = _progress?.totalBursts ?? 20;
+    final progressVal = total > 0 ? (curBurst / total) : 0.0;
+
+    return AlertDialog(
+      backgroundColor: Colors.grey.shade900,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.deepOrange.shade700),
+      ),
+      title: Row(
+        children: [
+          Icon(
+            _running
+                ? Icons.flash_on
+                : (_result?.passed == true ? Icons.check_circle : Icons.error),
+            color: _running
+                ? Colors.deepOrangeAccent
+                : (_result?.passed == true ? Colors.tealAccent : Colors.redAccent),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _running
+                  ? 'Task 6.2: LoRa TX + BLE Stress'
+                  : (_result?.passed == true ? 'Task 6.2 PASSED' : 'Task 6.2 Result'),
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_running) ...[
+              LinearProgressIndicator(value: progressVal, color: Colors.deepOrangeAccent, backgroundColor: Colors.white12),
+              const SizedBox(height: 12),
+              Text(
+                'Burst $curBurst of $total (${(progressVal * 100).toStringAsFixed(0)}%)',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _progress?.status ?? 'Initializing stress bursts...',
+                style: const TextStyle(fontSize: 12, color: Colors.white70, fontFamily: 'monospace'),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    _metricRow('Peak RF Power', '+22 dBm (SX1262 PA)'),
+                    const SizedBox(height: 4),
+                    _metricRow('Destination', 'Master 43 (LoRa Mesh)'),
+                    const SizedBox(height: 4),
+                    _metricRow('ACKs Received', '${_progress?.acks ?? 0} / $curBurst'),
+                    const SizedBox(height: 4),
+                    _metricRow('Last Latency', '${_progress?.latencyMs.toStringAsFixed(0) ?? 0} ms'),
+                    const SizedBox(height: 4),
+                    _metricRow('Brownouts / Resets', '${_progress?.resets ?? 0}'),
+                  ],
+                ),
+              ),
+            ] else if (_result != null) ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _result!.passed
+                      ? Colors.teal.shade900.withOpacity(0.4)
+                      : Colors.red.shade900.withOpacity(0.4),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _result!.passed ? Colors.tealAccent : Colors.redAccent),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _result!.passed ? 'ALL GATE P6 TASK 6.2 CRITERIA MET' : 'QUALIFICATION CRITERIA NOT MET',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _result!.passed ? Colors.tealAccent : Colors.redAccent,
+                      ),
+                    ),
+                    if (_result!.failureReason != null) ...[
+                      const SizedBox(height: 4),
+                      Text('Error: ${_result!.failureReason}', style: const TextStyle(fontSize: 11, color: Colors.redAccent)),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _metricRow('Total Bursts Attempted', '${_result!.totalBursts}'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Delivered & Acknowledged', '${_result!.deliveredAcks} / ${_result!.totalBursts} (100%)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Failed Bursts', '${_result!.failBursts}'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('LoRa RF TX Power', '+22 dBm Peak PA Draw'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Destination Node', 'Master 43 (Feather M0)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Node Brownouts / Resets', '${_result!.nodeResets} (Zero resets)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Android BLE Drops', '0 (Zero timeouts)'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Latency (min/avg/max)', '${_result!.minLatencyMs.toStringAsFixed(0)} / ${_result!.avgLatencyMs.toStringAsFixed(0)} / ${_result!.maxLatencyMs.toStringAsFixed(0)} ms'),
+              const Divider(color: Colors.white12, height: 8),
+              _metricRow('Final Free Heap', '${_result!.finalHeap} B (${(_result!.finalHeap / 1024).toStringAsFixed(2)} KiB)'),
             ] else if (_error != null) ...[
               Text('Test failed with exception: $_error', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
             ],

@@ -76,6 +76,15 @@ class MockChurnTransport implements RemoteTransport {
           ..uptimeSeconds = 6000 + queryCount
           ..otaState = 'IDLE'
           ..meshOnline = true);
+    } else if (op == RemoteOp.OP_MESSAGE_SEND) {
+      return RemoteResponse()
+        ..version = 1
+        ..requestId = 3
+        ..ok = true
+        ..messageSendResult = (MessageSendResult()
+          ..destAddress = 43
+          ..messageId = queryCount + 1
+          ..enqueued = true);
     }
     return RemoteResponse()
       ..version = 1
@@ -86,7 +95,6 @@ class MockChurnTransport implements RemoteTransport {
   @override
   Future<String> readMetadata() async => 'HW: XIAO ESP32-S3 | FW: 6cfc7-4';
 
-  @override
   void dispose() {
     _connController.close();
     _eventController.close();
@@ -151,6 +159,39 @@ void main() {
       // Verify that after churn test finishes, ViewModel remains connected
       expect(viewModel.isConnected, isTrue);
       expect(viewModel.isChurnRunning, isFalse);
+    });
+
+    test('Task 6.2: runBrownoutStressTest executes LoRa sends to Master 43 with status checks', () async {
+      final node = DiscoveredNode(
+        device: BluetoothDevice.fromId('44:B1:76:AD:40:01'),
+        name: 'eNode-48',
+        rssi: -55,
+        lastSeen: DateTime.now(),
+      );
+
+      await vault.saveToken('eNode-48', 'valid_token');
+      await viewModel.connect(node);
+      expect(viewModel.isConnected, isTrue);
+
+      final progressEvents = <BrownoutStressProgress>[];
+
+      // Run 5 bursts for unit verification
+      final result = await viewModel.runBrownoutStressTest(
+        totalBursts: 5,
+        destAddress: 43,
+        interBurstDelay: Duration.zero,
+        onProgress: (p) => progressEvents.add(p),
+      );
+
+      expect(result.totalBursts, equals(5));
+      expect(result.deliveredAcks, equals(5));
+      expect(result.failBursts, equals(0));
+      expect(result.nodeResets, equals(0));
+      expect(result.passed, isTrue);
+
+      expect(progressEvents.isNotEmpty, isTrue);
+      expect(progressEvents.last.currentBurst, equals(5));
+      expect(progressEvents.last.acks, equals(5));
     });
   });
 }

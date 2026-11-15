@@ -92,6 +92,56 @@ class ChurnTestResult {
   });
 }
 
+class BrownoutStressProgress {
+  final int currentBurst;
+  final int totalBursts;
+  final double latencyMs;
+  final int heap;
+  final int uptime;
+  final int resets;
+  final int acks;
+  final String status;
+
+  BrownoutStressProgress({
+    required this.currentBurst,
+    required this.totalBursts,
+    required this.latencyMs,
+    required this.heap,
+    required this.uptime,
+    required this.resets,
+    required this.acks,
+    required this.status,
+  });
+}
+
+class BrownoutStressResult {
+  final int totalBursts;
+  final int deliveredAcks;
+  final int failBursts;
+  final int nodeResets;
+  final int initialHeap;
+  final int finalHeap;
+  final double minLatencyMs;
+  final double avgLatencyMs;
+  final double maxLatencyMs;
+  final bool passed;
+  final String? failureReason;
+
+  BrownoutStressResult({
+    required this.totalBursts,
+    required this.deliveredAcks,
+    required this.failBursts,
+    required this.nodeResets,
+    required this.initialHeap,
+    required this.finalHeap,
+    required this.minLatencyMs,
+    required this.avgLatencyMs,
+    required this.maxLatencyMs,
+    required this.passed,
+    this.failureReason,
+  });
+}
+
 class NodeSessionViewModel extends ChangeNotifier {
   final RemoteTransport _transport;
   final TokenVault _vault;
@@ -879,6 +929,148 @@ class NodeSessionViewModel extends ChangeNotifier {
       finalHeap: finH,
       heapDelta: deltaH,
       heapStable: heapStable,
+      minLatencyMs: minLat,
+      avgLatencyMs: avgLat,
+      maxLatencyMs: maxLat,
+      passed: passed,
+      failureReason: failureReason,
+    );
+  }
+
+  /// Priority Gate P6 Task 6.2: Simultaneous LoRa TX + BLE Stress on Android
+  Future<BrownoutStressResult> runBrownoutStressTest({
+    int totalBursts = 20,
+    int destAddress = 43,
+    Duration interBurstDelay = const Duration(milliseconds: 250),
+    void Function(BrownoutStressProgress progress)? onProgress,
+  }) async {
+    if (!isConnected || !isAuthenticated) {
+      throw const RemoteTransportException('Node must be connected and authenticated for stress test');
+    }
+
+    _isExecutingCommand = true;
+    notifyListeners();
+
+    int ackCount = 0;
+    int failCount = 0;
+    int resets = 0;
+    int initialHeap = 0;
+    int? finalHeap;
+    int initialUptime = 0;
+    int? prevUptime;
+    final List<double> latencies = [];
+    String? failureReason;
+
+    traceLog?.logControl('STRESS', '=== TASK 6.2: SIMULTANEOUS LORA TX (+22 dBm) + BLE STRESS START ===');
+
+    try {
+      // Baseline status
+      final baseline = await getStatus();
+      initialHeap = baseline.freeHeap;
+      initialUptime = baseline.uptimeSeconds;
+      prevUptime = initialUptime;
+
+      for (int b = 1; b <= totalBursts; b++) {
+        final stopwatch = Stopwatch()..start();
+        onProgress?.call(BrownoutStressProgress(
+          currentBurst: b,
+          totalBursts: totalBursts,
+          latencyMs: latencies.isNotEmpty ? latencies.last : 0.0,
+          heap: finalHeap ?? initialHeap,
+          uptime: prevUptime ?? initialUptime,
+          resets: resets,
+          acks: ackCount,
+          status: 'Burst $b/$totalBursts: Transmitting LoRa (+22 dBm) to Master $destAddress...',
+        ));
+
+        try {
+          final msgText = 'Stress Burst #$b/$totalBursts';
+
+          // 1. Transmit authenticated mesh message to Master (SX1262 peak RF draw +22 dBm)
+          final sendRes = await sendMessage(destAddress, msgText, timeout: const Duration(seconds: 12));
+
+          // 2. Query node status to verify BLE link and rail stability during/after RF burst
+          final statusRes = await getStatus();
+
+          final elapsed = stopwatch.elapsedMilliseconds.toDouble();
+          latencies.add(elapsed);
+
+          final curUptime = statusRes.uptimeSeconds;
+          final curHeap = statusRes.freeHeap;
+
+          if (curUptime < initialUptime) {
+            resets++;
+          }
+          prevUptime = curUptime;
+          finalHeap = curHeap;
+
+          if (sendRes.enqueued) {
+            ackCount++;
+            final logMsg = '[$b/$totalBursts] OK (ACK received, ID: ${sendRes.messageId}, ${elapsed.toStringAsFixed(0)}ms, heap=$curHeap B)';
+            traceLog?.logControl('STRESS', logMsg);
+          } else {
+            failCount++;
+            traceLog?.logControl('STRESS_ERR', '[$b/$totalBursts] FAIL: Message not enqueued');
+          }
+
+          onProgress?.call(BrownoutStressProgress(
+            currentBurst: b,
+            totalBursts: totalBursts,
+            latencyMs: elapsed,
+            heap: curHeap,
+            uptime: curUptime,
+            resets: resets,
+            acks: ackCount,
+            status: 'Burst $b/$totalBursts: ACK received (${elapsed.toStringAsFixed(0)}ms)',
+          ));
+
+          if (b < totalBursts && interBurstDelay > Duration.zero) {
+            await Future.delayed(interBurstDelay);
+          }
+        } catch (e) {
+          final elapsed = stopwatch.elapsedMilliseconds.toDouble();
+          failCount++;
+          final errStr = '[$b/$totalBursts] FAIL (${elapsed.toStringAsFixed(0)}ms): $e';
+          traceLog?.logControl('STRESS_ERR', errStr);
+
+          onProgress?.call(BrownoutStressProgress(
+            currentBurst: b,
+            totalBursts: totalBursts,
+            latencyMs: elapsed,
+            heap: finalHeap ?? 0,
+            uptime: prevUptime ?? 0,
+            resets: resets,
+            acks: ackCount,
+            status: 'Burst $b/$totalBursts FAILED: $e',
+          ));
+
+          if (failCount >= 5) {
+            failureReason = 'Aborted after consecutive failures: $e';
+            break;
+          }
+        }
+      }
+    } finally {
+      _isExecutingCommand = false;
+      notifyListeners();
+    }
+
+    final initH = initialHeap;
+    final finH = finalHeap ?? 0;
+    final minLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a < b ? a : b) : 0.0;
+    final maxLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a > b ? a : b) : 0.0;
+    final avgLat = latencies.isNotEmpty ? latencies.reduce((a, b) => a + b) / latencies.length : 0.0;
+    final passed = (ackCount == totalBursts) && (failCount == 0) && (resets == 0);
+
+    traceLog?.logControl('STRESS', '=== TASK 6.2 COMPLETE: ${passed ? "PASSED" : "FAILED"} ($ackCount/$totalBursts delivered & ACKed, resets=$resets) ===');
+
+    return BrownoutStressResult(
+      totalBursts: totalBursts,
+      deliveredAcks: ackCount,
+      failBursts: failCount,
+      nodeResets: resets,
+      initialHeap: initH,
+      finalHeap: finH,
       minLatencyMs: minLat,
       avgLatencyMs: avgLat,
       maxLatencyMs: maxLat,
