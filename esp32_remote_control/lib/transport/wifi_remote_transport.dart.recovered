@@ -1,0 +1,270 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
+import 'package:protobuf/protobuf.dart';
+import '../core/errors.dart';
+import '../core/remote_transport.dart';
+import '../generated/esp_remote.pb.dart';
+import '../services/trace_log_service.dart';
+import 'response_correlator.dart';
+
+/// Secure WebSocket (WSS) Transport for esp_remote mesh nodes.
+class WifiRemoteTransport implements RemoteTransport {
+  static const String defaultPin =
+      'c10fab0b0979d91bf9bdd455ddf0f7bed17b4e6a3a83501cd949be8303a7d7d7';
+  static const int defaultPort = 8443;
+  static const String defaultSubprotocol = 'esp-remote.v1';
+
+  String pin;
+  final int port;
+  final String subprotocol;
+  TraceLogService? traceLog;
+
+  final ResponseCorrelator _correlator = ResponseCorrelator();
+  final StreamController<bool> _connectionStreamController =
+      StreamController<bool>.broadcast(sync: true);
+
+  WebSocket? _ws;
+  StreamSubscription? _wsSub;
+  bool _isConnected = false;
+  int _reqCounter = 1;
+
+  String _connectedHost = '';
+  int _connectedPort = defaultPort;
+  String _peerCertSha256 = '';
+
+  WifiRemoteTransport({
+    this.pin = defaultPin,
+    this.port = defaultPort,
+    this.subprotocol = defaultSubprotocol,
+    this.traceLog,
+  });
+
+  @override
+  bool get isConnected => _isConnected && _ws != null;
+
+  @override
+  int get negotiatedMtu => 1024;
+
+  @override
+  String get transportType => 'WSS';
+
+  @override
+  String get framingMode => 'complete_protobuf_binary_message';
+
+  @override
+  Stream<EventNotification> get eventStream => _correlator.eventStream;
+
+  @override
+  Stream<bool> get connectionStream => _connectionStreamController.stream;
+
+  String get connectedHost => _connectedHost;
+  int get connectedPort => _connectedPort;
+  String get peerCertSha256 => _peerCertSha256;
+
+  @override
+  Future<void> connect(String target) async {
+    await disconnect();
+
+    // Parse target host and port
+    String host = target.trim();
+    int targetPort = port;
+
+    if (host.contains(':')) {
+      final parts = host.split(':');
+      host = parts[0];
+      targetPort = int.tryParse(parts[1]) ?? port;
+    }
+
+    _connectedHost = host;
+    _connectedPort = targetPort;
+    _peerCertSha256 = '';
+
+    final uri = Uri.parse('wss://$host:$targetPort/remote');
+    traceLog?.logControl('WSS', 'Connecting to $uri (Subprotocol: $subprotocol)...');
+
+    // Build custom HttpClient with strict SHA-256 certificate pinning
+    final httpClient = HttpClient();
+
+    httpClient.badCertificateCallback = (X509Certificate cert, String host, int port) {
+      final certDer = cert.der;
+      final digest = sha256.convert(certDer).toString().toLowerCase();
+      _peerCertSha256 = digest;
+
+      final expectedPinClean = pin.toLowerCase().replaceAll(':', '').trim();
+      if (expectedPinClean.isNotEmpty && digest != expectedPinClean) {
+        traceLog?.logError(
+          'TLS',
+          'TLS Pin Mismatch! Expected: $expectedPinClean, Received: $digest',
+        );
+        print('[WifiRemoteTransport] TLS Pin Mismatch! Expected: $expectedPinClean, Received: $digest');
+        // Abort TLS handshake immediately prior to data exposure
+        return false;
+      }
+
+      traceLog?.logControl('TLS', 'Server TLS Certificate SHA-256 Verified: ${digest.substring(0, 16)}...');
+      print('[WifiRemoteTransport] Server TLS Cert SHA-256 Verified: $digest');
+      return true;
+    };
+
+    // Retry connection for socket settling if needed
+    Object? lastError;
+    for (int attempt = 0; attempt < 4; attempt++) {
+      try {
+        final wsFuture = WebSocket.connect(
+          uri.toString(),
+          customClient: httpClient,
+          protocols: [subprotocol],
+        );
+
+        _ws = await wsFuture.timeout(const Duration(seconds: 10));
+        break;
+      } catch (e) {
+        lastError = e;
+        print('[WifiRemoteTransport] Connection attempt $attempt failed: $e');
+        if (attempt < 3) {
+          traceLog?.logControl('WSS', 'Socket settling/retry ($e), waiting 1.0s...');
+          await Future.delayed(const Duration(seconds: 1));
+        }
+      }
+    }
+
+    if (_ws == null) {
+      traceLog?.logError('WSS', 'Failed to connect to $uri: $lastError');
+      httpClient.close();
+      throw RemoteTransportException('Failed to connect to $uri: $lastError');
+    }
+
+    _isConnected = true;
+    if (!_connectionStreamController.isClosed) {
+      _connectionStreamController.add(true);
+    }
+    traceLog?.logControl('WSS', 'Connected successfully to $uri (Protocol: ${_ws!.protocol})');
+
+    // Listen to inbound binary frames
+    _wsSub = _ws!.listen(
+      (data) {
+        if (data is List<int>) {
+          try {
+            final rawBytes = Uint8List.fromList(data);
+            final resp = RemoteResponse.fromBuffer(rawBytes);
+            _correlator.handleResponse(resp);
+          } catch (e) {
+            traceLog?.logError('WSS', 'Failed to decode protobuf message: $e');
+          }
+        }
+      },
+      onError: (error) {
+        traceLog?.logError('WSS', 'WebSocket error: $error');
+        _handleDisconnect();
+      },
+      onDone: () {
+        traceLog?.logControl('WSS', 'WebSocket connection closed by server');
+        _handleDisconnect();
+      },
+      cancelOnError: true,
+    );
+  }
+
+  void _handleDisconnect() {
+    if (_isConnected) {
+      _isConnected = false;
+      if (!_connectionStreamController.isClosed) {
+        _connectionStreamController.add(false);
+      }
+    }
+    _wsSub?.cancel();
+    _wsSub = null;
+    _ws = null;
+    _correlator.handleDisconnect();
+    traceLog?.logControl('WSS', 'Disconnected from $_connectedHost');
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _isConnected = false;
+    if (!_connectionStreamController.isClosed) {
+      _connectionStreamController.add(false);
+    }
+    await _wsSub?.cancel();
+    _wsSub = null;
+    if (_ws != null) {
+      try {
+        await _ws!.close(WebSocketStatus.normalClosure, 'Client disconnecting');
+      } catch (_) {}
+      _ws = null;
+    }
+    _correlator.handleDisconnect();
+  }
+
+  @override
+  Future<RemoteResponse> executeRequest({
+    required RemoteOp op,
+    GeneratedMessage? args,
+    String? authToken,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    if (!isConnected || _ws == null) {
+      throw const RemoteTransportException('Cannot execute request: WSS transport not connected');
+    }
+
+    final reqId = _reqCounter;
+    _reqCounter = (_reqCounter + 1) & 0x7FFFFFFF;
+    if (_reqCounter == 0) _reqCounter = 1;
+
+    final request = RemoteRequest(
+      requestId: reqId,
+      op: op,
+    );
+
+    if (authToken != null && authToken.isNotEmpty) {
+      request.authToken = authToken;
+    }
+
+    if (args != null) {
+      switch (op) {
+        case RemoteOp.OP_PING:
+          if (args is PingArgs) request.pingArgs = args;
+          break;
+        case RemoteOp.OP_MESSAGE_SEND:
+          if (args is MessageSendArgs) request.messageSendArgs = args;
+          break;
+        case RemoteOp.OP_EVENT_SUB:
+          if (args is EventSubArgs) request.eventSubArgs = args;
+          break;
+        default:
+          break;
+      }
+    }
+
+    final rawBytes = Uint8List.fromList(request.writeToBuffer());
+    traceLog?.logTx('TX', 'Req #$reqId ${op.name} (${rawBytes.length} B)', rawBytes);
+
+    // Register with correlator before transmission
+    final responseFuture = _correlator.registerRequest(
+      requestId: reqId,
+      op: op,
+      timeout: timeout,
+    );
+
+    try {
+      // Send complete binary message across WebSocket
+      _ws!.add(rawBytes);
+    } catch (e) {
+      traceLog?.logError('WSS', 'Failed to send frame: $e');
+      _handleDisconnect();
+      throw RemoteTransportException('Failed to write frame to socket: $e');
+    }
+
+    return await responseFuture;
+  }
+
+  @override
+  Future<String> readMetadata() async {
+    final pinShort = _peerCertSha256.isNotEmpty
+        ? (_peerCertSha256.length > 16 ? '${_peerCertSha256.substring(0, 16)}...' : _peerCertSha256)
+        : (pin.length > 16 ? '${pin.substring(0, 16)}...' : pin);
+    return 'Transport: WSS | Host: $_connectedHost:$_connectedPort | Subprotocol: $subprotocol | Pin: $pinShort';
+  }
+}
